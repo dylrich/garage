@@ -46,6 +46,8 @@ pub async fn check_payload_signature(
 		check_presigned_signature(garage, service, request, query).await
 	} else if request.headers().contains_key(AUTHORIZATION) {
 		check_standard_signature(garage, service, request, query).await
+	} else if request.headers().contains_key("X-GARAGE-ACCESS-KEY-ID") {
+		check_garage_authorization(garage, request).await
 	} else {
 		// Unsigned (anonymous) request
 		let content_sha256 = request
@@ -91,6 +93,38 @@ fn parse_x_amz_content_sha256(header: Option<&str>) -> Result<ContentSha256Heade
 			.ok_or_bad_request("Invalid content sha256 hash")?;
 		Ok(ContentSha256Header::Sha256Checksum(sha256))
 	}
+}
+
+async fn check_garage_authorization(
+	garage: &Garage,
+	request: &Request<IncomingBody>,
+) -> Result<(Option<Key>, Option<Hash>), Error> {
+	let headers = request.headers();
+
+	let secret_key = headers
+		.get("X-GARAGE-SECRET-ACCESS-KEY")
+		.ok_or_bad_request("Missing X-GARAGE-SECRET-ACCESS-KEY header")?
+		.to_str()?;
+
+	let key_id = headers
+		.get("X-GARAGE-ACCESS-KEY-ID")
+		.ok_or_bad_request("Missing X-GARAGE-ACCESS-KEY-ID header")?
+		.to_str()?;
+
+	let key = garage
+		.key_table
+		.get(&EmptyKey, &key_id.to_string())
+		.await?
+		.filter(|k| !k.state.is_deleted())
+		.ok_or_else(|| Error::forbidden(format!("No such key: {}", &key_id.to_string())))?;
+
+	let key_p = key.params().unwrap();
+
+	if key_p.secret_key != secret_key {
+		return Ok((None, None));
+	}
+
+	Ok((Some(key), None))
 }
 
 async fn check_standard_signature(
